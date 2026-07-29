@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, replace
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
@@ -42,7 +43,10 @@ class Presentation:
     source: str = "聊天记录"
 
 
-_INLINE_TOKEN = re.compile(r"(?<!\\)\[(at|image|face):([^\]\r\n]+)\]")
+_INLINE_TOKEN = re.compile(
+    r"(?<!\\)(?:\[(at|image|face):([^\]\r\n]+)\]|"
+    r"\[CQ:(image|face),([^\]\r\n]+)\])"
+)
 _DSL_NODE = re.compile(r"^\s*(\d+)(?:\[([^\]\r\n]+)\])?\s*:\s*(.*)$")
 _LEGACY_NODE = re.compile(r"^\s*(\d+)\s+(.+?)\s*$", re.DOTALL)
 
@@ -82,14 +86,37 @@ def _name(value: Any, limits: Limits) -> str | None:
     return value
 
 
-def _image_url(value: Any) -> str:
+def _image_source(value: Any, *, allow_local: bool = False) -> str:
     if not isinstance(value, str):
-        raise _error("图片 URL 必须是字符串")
+        raise _error("图片来源必须是字符串")
     value = value.strip()
     parsed = urlsplit(value)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        raise _error("图片仅支持有效的 HTTP/HTTPS URL")
-    return value
+    if parsed.scheme.lower() in {"http", "https"} and parsed.netloc:
+        return value
+    if allow_local and (
+        PureWindowsPath(value).is_absolute() or PurePosixPath(value).is_absolute()
+    ):
+        return value
+    raise _error("图片仅支持有效的 HTTP/HTTPS URL 或 AstrBot 临时文件绝对路径")
+
+
+def _cq_unescape(value: str) -> str:
+    return (
+        value.replace("&#91;", "[")
+        .replace("&#93;", "]")
+        .replace("&#44;", ",")
+        .replace("&amp;", "&")
+    )
+
+
+def _cq_params(value: str) -> dict[str, str]:
+    params = {}
+    for item in value.split(","):
+        key, separator, raw_value = item.partition("=")
+        if not separator or not key:
+            raise _error("CQ 码参数格式错误")
+        params[key] = _cq_unescape(raw_value)
+    return params
 
 
 def _segment_from_mapping(raw: Mapping[str, Any]) -> Segment:
@@ -102,7 +129,7 @@ def _segment_from_mapping(raw: Mapping[str, Any]) -> Segment:
     if segment_type == "at":
         return Segment("at", _positive_id(raw.get("qq"), "@ 目标"))
     if segment_type == "image":
-        return Segment("image", _image_url(raw.get("url")))
+        return Segment("image", _image_source(raw.get("url")))
     if segment_type == "face":
         face_id = _nonnegative_id(raw.get("id"), "表情 ID")
         if int(face_id) > 65535:
@@ -128,11 +155,23 @@ def parse_inline_content(text: str) -> tuple[Segment, ...]:
     cursor = 0
     for match in _INLINE_TOKEN.finditer(text):
         _append_text(segments, text[cursor : match.start()])
-        token_type, token_value = match.groups()
+        token_type, token_value, cq_type, cq_value = match.groups()
+        is_cq_code = cq_type is not None
+        if is_cq_code:
+            token_type = cq_type
+            params = _cq_params(cq_value)
+            token_value = params.get("file") if token_type == "image" else params.get("id")
+            if token_value is None:
+                raise _error(f"CQ {token_type} 码缺少必要参数")
         if token_type == "at":
             segments.append(Segment("at", _positive_id(token_value, "@ 目标")))
         elif token_type == "image":
-            segments.append(Segment("image", _image_url(token_value)))
+            segments.append(
+                Segment(
+                    "image",
+                    _image_source(token_value, allow_local=is_cq_code),
+                )
+            )
         else:
             face_id = _nonnegative_id(token_value, "表情 ID")
             if int(face_id) > 65535:
@@ -149,7 +188,7 @@ def _content(raw: Any) -> tuple[Segment, ...]:
     if isinstance(raw, str):
         if not raw:
             raise _error("节点内容不能为空")
-        return (Segment("text", raw),)
+        return parse_inline_content(raw)
     if not isinstance(raw, list) or not raw:
         raise _error("content 必须是非空字符串或消息段数组")
     segments: list[Segment] = []
@@ -226,7 +265,10 @@ def parse_legacy(
         sender_id, text = match.groups()
         segments = [Segment("text", text)]
         if images_by_node and index < len(images_by_node):
-            segments.extend(Segment("image", _image_url(url)) for url in images_by_node[index])
+            segments.extend(
+                Segment("image", _image_source(url))
+                for url in images_by_node[index]
+            )
         nodes.append(ForwardNode(_positive_id(sender_id, "QQ 号"), None, tuple(segments)))
     return validate_nodes(nodes, limits)
 
@@ -264,7 +306,7 @@ def validate_nodes(nodes: Sequence[ForwardNode], limits: Limits | None = None) -
                     )
                 total_text += len(segment.value)
             elif segment.type == "image":
-                _image_url(segment.value)
+                _image_source(segment.value, allow_local=True)
                 total_images += 1
             elif segment.type == "at":
                 _positive_id(segment.value, "@ 目标")
@@ -310,7 +352,7 @@ def _segment_payload(segment: Segment) -> dict[str, Any]:
     if segment.type == "image":
         return {"type": "image", "data": {"file": segment.value}}
     if segment.type == "face":
-        return {"type": "face", "data": {"id": segment.value}}
+        return {"type": "face", "data": {"id": int(segment.value)}}
     raise _error(f"不支持的消息段类型：{segment.type!r}")
 
 

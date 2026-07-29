@@ -1,8 +1,15 @@
 import json
+from pathlib import Path
 
 import pytest
+from astrbot.api.message_components import Image
 
-from astrbot_plugin_sessionfaker.forward_message import ForwardMessageError, parse_dsl
+import astrbot_plugin_sessionfaker.main as sessionfaker_main
+from astrbot_plugin_sessionfaker.forward_message import (
+    ForwardMessageError,
+    parse_dsl,
+    parse_json_nodes,
+)
 from astrbot_plugin_sessionfaker.main import SessionFakerPlugin
 
 
@@ -106,6 +113,110 @@ async def test_send_path_uses_current_group_resolves_members_and_marks_event():
         if call[0] == "get_group_member_info"
     }
     assert member_ids == {"999", "10001", "10002"}
+
+
+@pytest.mark.asyncio
+async def test_send_path_serializes_image_and_face_for_forward_nodes(monkeypatch):
+    async def fake_convert_to_base64(image):
+        assert image.file == "https://example.com/a.png"
+        return "encoded-image"
+
+    monkeypatch.setattr(Image, "convert_to_base64", fake_convert_to_base64)
+    bot = FakeBot(members())
+    event = FakeEvent(bot)
+    plugin = make_plugin()
+
+    await plugin._send_forward(
+        event,
+        parse_dsl("10001: [image:https://example.com/a.png][face:14]"),
+    )
+
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert payload["messages"][0]["data"]["content"] == [
+        {"type": "image", "data": {"file": "base64://encoded-image"}},
+        {"type": "face", "data": {"id": 14}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_path_accepts_cq_image_only_from_astrbot_temp(
+    monkeypatch,
+    tmp_path,
+):
+    astrbot_temp = tmp_path / "data" / "temp"
+    astrbot_temp.mkdir(parents=True)
+    image_path = astrbot_temp / "generated.jpg"
+    image_path.write_bytes(b"image")
+
+    async def fake_convert_to_base64(image):
+        assert Path(image.path) == image_path.resolve()
+        return "local-image"
+
+    monkeypatch.setattr(
+        sessionfaker_main,
+        "get_astrbot_temp_path",
+        lambda: str(astrbot_temp),
+    )
+    monkeypatch.setattr(Image, "convert_to_base64", fake_convert_to_base64)
+    bot = FakeBot(members())
+    plugin = make_plugin()
+    nodes = parse_json_nodes(
+        json.dumps(
+            [
+                {
+                    "sender_id": "10001",
+                    "content": f"image\n[CQ:image,file={image_path}]",
+                },
+                {
+                    "sender_id": "10002",
+                    "content": "face\n[CQ:face,id=14]",
+                },
+            ]
+        )
+    )
+
+    await plugin._send_forward(FakeEvent(bot), nodes)
+
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert payload["messages"][0]["data"]["content"][1] == {
+        "type": "image",
+        "data": {"file": "base64://local-image"},
+    }
+    assert payload["messages"][1]["data"]["content"][1] == {
+        "type": "face",
+        "data": {"id": 14},
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_path_rejects_cq_image_outside_astrbot_temp(monkeypatch, tmp_path):
+    astrbot_temp = tmp_path / "data" / "temp"
+    astrbot_temp.mkdir(parents=True)
+    outside_image = tmp_path / "secret.jpg"
+    outside_image.write_bytes(b"not allowed")
+    monkeypatch.setattr(
+        sessionfaker_main,
+        "get_astrbot_temp_path",
+        lambda: str(astrbot_temp),
+    )
+    plugin = make_plugin()
+    nodes = parse_json_nodes(
+        json.dumps(
+            [
+                {
+                    "sender_id": "10001",
+                    "content": f"[CQ:image,file={outside_image}]",
+                }
+            ]
+        )
+    )
+
+    with pytest.raises(ForwardMessageError, match="临时目录"):
+        await plugin._send_forward(FakeEvent(FakeBot(members())), nodes)
 
 
 @pytest.mark.asyncio

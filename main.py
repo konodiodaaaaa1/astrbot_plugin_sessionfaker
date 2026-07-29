@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import Image, Plain
+from astrbot.api.message_components import At, Face, Image, Node, Nodes, Plain
 from astrbot.api.star import Context, Star
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .forward_message import (
     ForwardMessageError,
@@ -169,6 +172,42 @@ class SessionFakerPlugin(Star):
             presentation or self._presentation(),
             self._limits(),
         )
+        component_nodes = []
+        for node in resolved_nodes:
+            content = []
+            for segment in node.content:
+                if segment.type == "text":
+                    content.append(Plain(segment.value))
+                elif segment.type == "at":
+                    content.append(At(qq=segment.value))
+                elif segment.type == "image":
+                    parsed = urlsplit(segment.value)
+                    if parsed.scheme.lower() in {"http", "https"}:
+                        content.append(Image.fromURL(segment.value))
+                    else:
+                        try:
+                            image_path = Path(segment.value).resolve(strict=True)
+                            temp_root = Path(get_astrbot_temp_path()).resolve(strict=True)
+                        except (OSError, RuntimeError) as exc:
+                            raise ForwardMessageError("本地图片不存在或路径无效") from exc
+                        if not image_path.is_file() or not image_path.is_relative_to(temp_root):
+                            raise ForwardMessageError(
+                                "本地图片仅允许使用 AstrBot 临时目录中的文件"
+                            )
+                        content.append(Image.fromFileSystem(image_path))
+                elif segment.type == "face":
+                    content.append(Face(id=int(segment.value)))
+            component_nodes.append(
+                Node(
+                    uin=node.sender_id,
+                    name=node.sender_name,
+                    content=content,
+                )
+            )
+        try:
+            payload["messages"] = (await Nodes(nodes=component_nodes).to_dict())["messages"]
+        except Exception as exc:
+            raise ForwardMessageError("图片下载或转换失败") from exc
         await event.bot.call_action(
             "send_group_forward_msg",
             **payload,
@@ -271,7 +310,7 @@ class SessionFakerPlugin(Star):
         """在当前 QQ 群发送受控的合并转发消息，不可指定目标群。
 
         Args:
-            nodes_json(string): JSON 节点数组；每项含 sender_id、可选 sender_name 和 content。
+            nodes_json(string): JSON 节点数组；每项含 sender_id、可选 sender_name 和 content。content 字符串支持 [CQ:image,file=...] 和 [CQ:face,id=...]；本地图片必须位于 AstrBot data/temp 目录。
             prompt(string): 可选的转发卡片提示文字，留空使用插件配置。
             summary(string): 可选的转发卡片摘要，可使用 {count}，留空使用插件配置。
             source(string): 可选的转发卡片来源文字，留空使用插件配置。

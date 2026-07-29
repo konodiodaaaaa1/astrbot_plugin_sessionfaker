@@ -70,6 +70,53 @@ def test_command_input_selects_json_or_dsl():
     assert parse_command_input("2: y")[0].sender_id == "2"
 
 
+def test_json_string_content_expands_inline_media_tokens():
+    nodes = parse_json_nodes(
+        '[{"sender_id":"10001","content":"[image:https://example.com/a.png][face:14]"}]'
+    )
+
+    assert [(item.type, item.value) for item in nodes[0].content] == [
+        ("image", "https://example.com/a.png"),
+        ("face", "14"),
+    ]
+
+
+def test_json_string_content_expands_onebot_cq_image_and_face():
+    local_image = (
+        r"D:\AI\AstrBotLauncher-0.1.5.4\AstrBot\data\temp"
+        r"\media_image_2d5aebc6f22e4e7499bea55221616973.jpg"
+    )
+    nodes = parse_json_nodes(
+        json.dumps(
+            [
+                {
+                    "sender_id": "528217068",
+                    "content": (
+                        "[模拟消息] 表情包测试：\n"
+                        f"[CQ:image,file={local_image}]"
+                    ),
+                },
+                {
+                    "sender_id": "528217068",
+                    "content": (
+                        "[模拟消息] QQ 自带 FaceID 表情测试：\n"
+                        "[CQ:face,id=14]"
+                    ),
+                },
+            ]
+        )
+    )
+
+    assert [(item.type, item.value) for item in nodes[0].content] == [
+        ("text", "[模拟消息] 表情包测试：\n"),
+        ("image", local_image),
+    ]
+    assert [(item.type, item.value) for item in nodes[1].content] == [
+        ("text", "[模拟消息] QQ 自带 FaceID 表情测试：\n"),
+        ("face", "14"),
+    ]
+
+
 def test_legacy_images_stay_with_corresponding_node():
     nodes = parse_legacy(
         "10001 first | 10002 second",

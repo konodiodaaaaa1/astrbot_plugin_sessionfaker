@@ -32,7 +32,7 @@ JSON 格式：
 654321: [image:https://example.com/a.png][face:14]
 ```
 
-支持的行内标记是 `[at:QQ号]`、`[image:https://...]` 和 `[face:ID]`。在 `[` 前加反斜杠可输出字面标记，例如 `\[face:14]`。
+JSON 字符串内容和逐行 DSL 都支持 `[at:QQ号]`、`[image:https://...]` 和 `[face:ID]`。JSON/Tool 字符串还兼容 OneBot CQ 码 `[CQ:image,file=...]` 与 `[CQ:face,id=14]`；CQ 图片可以使用 AstrBot `data/temp` 中的本地绝对路径。在 `[` 前加反斜杠可输出字面标记，例如 `\[face:14]`。图片在发送前会由 AstrBot 转换为 NapCat 合并转发可用的格式。
 
 ## 旧命令
 
