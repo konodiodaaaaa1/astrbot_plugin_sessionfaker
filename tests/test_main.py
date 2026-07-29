@@ -1,0 +1,229 @@
+import json
+
+import pytest
+
+from astrbot_plugin_sessionfaker.forward_message import ForwardMessageError, parse_dsl
+from astrbot_plugin_sessionfaker.main import SessionFakerPlugin
+
+
+class FakeBot:
+    def __init__(self, members):
+        self.members = members
+        self.calls = []
+
+    async def call_action(self, action, **kwargs):
+        self.calls.append((action, kwargs))
+        if action == "get_group_member_info":
+            user_id = str(kwargs["user_id"])
+            if user_id not in self.members:
+                raise RuntimeError("not a member")
+            return {"user_id": int(user_id), **self.members[user_id]}
+        if action == "send_group_forward_msg":
+            return {"message_id": 1}
+        raise AssertionError(f"unexpected action: {action}")
+
+
+class FakeEvent:
+    def __init__(
+        self,
+        bot,
+        message="",
+        group_id="90001",
+        sender_id="999",
+        astrbot_admin=False,
+        platform="aiocqhttp",
+    ):
+        self.bot = bot
+        self.message = message
+        self.group_id = group_id
+        self.sender_id = sender_id
+        self.astrbot_admin = astrbot_admin
+        self.platform = platform
+        self._has_send_oper = False
+        self.stopped = False
+
+    def get_platform_name(self):
+        return self.platform
+
+    def get_group_id(self):
+        return self.group_id
+
+    def get_sender_id(self):
+        return self.sender_id
+
+    def get_self_id(self):
+        return "888"
+
+    def get_message_str(self):
+        return self.message
+
+    def get_messages(self):
+        return []
+
+    def is_admin(self):
+        return self.astrbot_admin
+
+    def stop_event(self):
+        self.stopped = True
+
+    def plain_result(self, value):
+        return value
+
+
+def make_plugin(**config):
+    plugin = object.__new__(SessionFakerPlugin)
+    plugin.config = config
+    return plugin
+
+
+def members(sender_role="member"):
+    return {
+        "999": {"nickname": "Caller", "role": sender_role},
+        "10001": {"card": "Card A", "nickname": "A", "role": "member"},
+        "10002": {"card": "", "nickname": "Nick B", "role": "member"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_send_path_uses_current_group_resolves_members_and_marks_event():
+    bot = FakeBot(members())
+    event = FakeEvent(bot)
+    plugin = make_plugin()
+
+    count = await plugin._send_forward(event, parse_dsl("10001: hi[at:10002]"))
+
+    assert count == 1
+    assert event._has_send_oper is True
+    send_calls = [call for call in bot.calls if call[0] == "send_group_forward_msg"]
+    assert len(send_calls) == 1
+    payload = send_calls[0][1]
+    assert payload["group_id"] == 90001
+    assert payload["self_id"] == 888
+    assert payload["messages"][0]["data"]["nickname"] == "Card A"
+    member_ids = {
+        str(call[1]["user_id"])
+        for call in bot.calls
+        if call[0] == "get_group_member_info"
+    }
+    assert member_ids == {"999", "10001", "10002"}
+
+
+@pytest.mark.asyncio
+async def test_explicit_name_does_not_skip_membership_check():
+    bot = FakeBot(members())
+    event = FakeEvent(bot)
+    plugin = make_plugin()
+
+    with pytest.raises(ForwardMessageError, match="10003"):
+        await plugin._send_forward(event, parse_dsl("10003[Override]: hi"))
+    assert not any(call[0] == "send_group_forward_msg" for call in bot.calls)
+
+
+@pytest.mark.asyncio
+async def test_private_and_other_platform_events_are_rejected_without_actions():
+    plugin = make_plugin()
+    private_bot = FakeBot(members())
+    with pytest.raises(ForwardMessageError, match="群聊"):
+        await plugin._send_forward(FakeEvent(private_bot, group_id=""), parse_dsl("10001: hi"))
+    assert private_bot.calls == []
+
+    other_bot = FakeBot(members())
+    with pytest.raises(ForwardMessageError, match="AIOCQHTTP"):
+        await plugin._send_forward(
+            FakeEvent(other_bot, platform="telegram"),
+            parse_dsl("10001: hi"),
+        )
+    assert other_bot.calls == []
+
+
+@pytest.mark.asyncio
+async def test_whitelist_is_checked_before_member_or_permission_queries():
+    bot = FakeBot(members())
+    event = FakeEvent(bot)
+    plugin = make_plugin(group_whitelist="123,456")
+    with pytest.raises(ForwardMessageError, match="白名单"):
+        await plugin._send_forward(event, parse_dsl("10001: hi"))
+    assert bot.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "role", "astrbot_admin", "allowed"),
+    [
+        ("everyone", "member", False, True),
+        ("astrbot_admin", "member", True, True),
+        ("astrbot_admin", "owner", False, False),
+        ("qq_group_admin", "admin", False, True),
+        ("qq_group_admin", "member", True, False),
+        ("admin_only", "member", True, True),
+        ("admin_only", "owner", False, True),
+        ("admin_only", "member", False, False),
+    ],
+)
+async def test_permission_modes(mode, role, astrbot_admin, allowed):
+    bot = FakeBot(members(role))
+    event = FakeEvent(bot, astrbot_admin=astrbot_admin)
+    plugin = make_plugin(permission_mode=mode)
+    if allowed:
+        await plugin._send_forward(event, parse_dsl("10001: hi"))
+        assert event._has_send_oper is True
+    else:
+        with pytest.raises(ForwardMessageError, match="权限"):
+            await plugin._send_forward(event, parse_dsl("10001: hi"))
+        assert not any(call[0] == "send_group_forward_msg" for call in bot.calls)
+
+
+@pytest.mark.asyncio
+async def test_command_and_tool_converge_on_send_service():
+    command_bot = FakeBot(members())
+    command_event = FakeEvent(
+        command_bot,
+        message='/伪造转发 [{"sender_id":"10001","content":"hello"}]',
+    )
+    plugin = make_plugin()
+    command_results = [item async for item in plugin.forward_command(command_event)]
+    assert command_results == []
+    assert command_event.stopped is True
+    assert command_event._has_send_oper is True
+
+    tool_bot = FakeBot(members())
+    tool_event = FakeEvent(tool_bot)
+    result = await plugin.send_qq_forward_message(
+        tool_event,
+        json.dumps([{"sender_id": "10002", "content": "hello"}]),
+    )
+    assert result == "已向当前群发送 1 个合并转发节点"
+    assert tool_event._has_send_oper is True
+    assert [call[0] for call in tool_bot.calls].count("send_group_forward_msg") == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_returns_plain_error_and_never_sends_on_invalid_member():
+    bot = FakeBot(members())
+    event = FakeEvent(bot)
+    plugin = make_plugin()
+    result = await plugin.send_qq_forward_message(
+        event,
+        '[{"sender_id":"123456","content":"hello"}]',
+    )
+    assert result.startswith("发送失败：")
+    assert event._has_send_oper is False
+    assert not any(call[0] == "send_group_forward_msg" for call in bot.calls)
+
+
+@pytest.mark.asyncio
+async def test_command_masks_unexpected_platform_errors():
+    class BrokenBot(FakeBot):
+        async def call_action(self, action, **kwargs):
+            if action == "send_group_forward_msg":
+                raise RuntimeError("sensitive transport detail")
+            return await super().call_action(action, **kwargs)
+
+    event = FakeEvent(
+        BrokenBot(members()),
+        message='/伪造转发 [{"sender_id":"10001","content":"hello"}]',
+    )
+    plugin = make_plugin()
+    results = [item async for item in plugin.forward_command(event)]
+    assert results == ["SessionFaker：QQ 平台调用异常"]
+    assert "sensitive" not in results[0]

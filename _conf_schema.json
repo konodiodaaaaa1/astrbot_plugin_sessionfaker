@@ -1,0 +1,78 @@
+{
+  "permission_mode": {
+    "description": "使用权限：everyone=所有人，astrbot_admin=AstrBot 管理员，qq_group_admin=QQ群管理员/群主，admin_only=任一管理员",
+    "type": "string",
+    "default": "everyone",
+    "options": [
+      "everyone",
+      "astrbot_admin",
+      "qq_group_admin",
+      "admin_only"
+    ]
+  },
+  "group_whitelist": {
+    "description": "允许使用的群号，逗号或空格分隔；留空允许所有群",
+    "type": "string",
+    "default": ""
+  },
+  "enable_legacy_command": {
+    "description": "启用旧版 /伪造消息 命令",
+    "type": "bool",
+    "default": true
+  },
+  "enable_llm_tool": {
+    "description": "允许 LLM 调用 send_qq_forward_message",
+    "type": "bool",
+    "default": true
+  },
+  "max_nodes": {
+    "description": "每次最多转发节点数",
+    "type": "int",
+    "default": 20
+  },
+  "max_segments_per_node": {
+    "description": "每个节点最多消息段数",
+    "type": "int",
+    "default": 12
+  },
+  "max_total_text_length": {
+    "description": "所有节点文本总字符上限",
+    "type": "int",
+    "default": 4000
+  },
+  "max_text_segment_length": {
+    "description": "单个文本消息段字符上限",
+    "type": "int",
+    "default": 1000
+  },
+  "max_images": {
+    "description": "每次最多图片数",
+    "type": "int",
+    "default": 8
+  },
+  "max_name_length": {
+    "description": "自定义显示名字符上限",
+    "type": "int",
+    "default": 64
+  },
+  "max_presentation_length": {
+    "description": "转发卡片提示、摘要和来源的字符上限",
+    "type": "int",
+    "default": 100
+  },
+  "forward_prompt": {
+    "description": "NapCat 转发卡片提示文字",
+    "type": "string",
+    "default": "[聊天记录]"
+  },
+  "forward_summary": {
+    "description": "NapCat 转发卡片摘要，可使用 {count} 表示节点数",
+    "type": "string",
+    "default": "查看 {count} 条转发消息"
+  },
+  "forward_source": {
+    "description": "NapCat 转发卡片来源文字",
+    "type": "string",
+    "default": "聊天记录"
+  }
+}
