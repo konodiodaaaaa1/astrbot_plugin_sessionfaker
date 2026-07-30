@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 
 import pytest
-from astrbot.api.message_components import Image
+from astrbot.api.message_components import At, AtAll, Image, Plain
 
 import astrbot_plugin_sessionfaker.main as sessionfaker_main
 from astrbot_plugin_sessionfaker.forward_message import (
@@ -39,6 +39,7 @@ class FakeEvent:
         sender_id="999",
         astrbot_admin=False,
         platform="aiocqhttp",
+        messages=None,
     ):
         self.bot = bot
         self.message = message
@@ -46,6 +47,7 @@ class FakeEvent:
         self.sender_id = sender_id
         self.astrbot_admin = astrbot_admin
         self.platform = platform
+        self.messages = messages or []
         self._has_send_oper = False
         self.stopped = False
 
@@ -65,7 +67,7 @@ class FakeEvent:
         return self.message
 
     def get_messages(self):
-        return []
+        return self.messages
 
     def is_admin(self):
         return self.astrbot_admin
@@ -306,6 +308,166 @@ async def test_command_and_tool_converge_on_send_service():
     assert result == "已向当前群发送 1 个合并转发节点"
     assert tool_event._has_send_oper is True
     assert [call[0] for call in tool_bot.calls].count("send_group_forward_msg") == 1
+
+
+@pytest.mark.asyncio
+async def test_forward_command_treats_at_components_as_qq_ids():
+    bot = FakeBot(members())
+    event = FakeEvent(
+        bot,
+        message="/伪造转发 @Card A(10001): hello @Nick B(10002)",
+        messages=[
+            At(qq="888", name="Bot"),
+            Plain("/伪造转发 "),
+            At(qq="10001", name="Card A"),
+            Plain(": hello[at:"),
+            At(qq="10002", name="Nick B"),
+            Plain("]"),
+        ],
+    )
+    plugin = make_plugin()
+
+    results = [item async for item in plugin.forward_command(event)]
+
+    assert results == []
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert payload["messages"][0]["data"]["user_id"] == "10001"
+    assert payload["messages"][0]["data"]["content"] == [
+        {"type": "text", "data": {"text": "hello"}},
+        {"type": "at", "data": {"qq": "10002"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_forward_json_command_accepts_at_sender_component():
+    bot = FakeBot(members())
+    event = FakeEvent(
+        bot,
+        messages=[
+            Plain('/伪造转发 [{"sender_id":'),
+            At(qq="10002", name="Nick B"),
+            Plain(',"content":"hello"}]'),
+        ],
+    )
+    plugin = make_plugin()
+
+    results = [item async for item in plugin.forward_command(event)]
+
+    assert results == []
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert payload["messages"][0]["data"]["user_id"] == "10002"
+
+
+@pytest.mark.asyncio
+async def test_legacy_command_accepts_at_sender_components():
+    bot = FakeBot(members())
+    event = FakeEvent(
+        bot,
+        messages=[
+            Plain("/伪造消息 "),
+            At(qq="10001", name="Card A"),
+            Plain(" first | "),
+            At(qq="10002", name="Nick B"),
+            Plain(" second"),
+        ],
+    )
+    plugin = make_plugin()
+
+    results = [item async for item in plugin.legacy_command(event)]
+
+    assert results == []
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert [node["data"]["user_id"] for node in payload["messages"]] == [
+        "10001",
+        "10002",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_legacy_at_sender_does_not_require_plain_text_leading_space():
+    group_members = members()
+    group_members["2116183730"] = {
+        "card": "Mentioned User",
+        "nickname": "Mentioned User",
+        "role": "member",
+    }
+    bot = FakeBot(group_members)
+    event = FakeEvent(
+        bot,
+        messages=[
+            Plain("/伪造消息 "),
+            At(qq="2116183730", name="Mentioned User"),
+            Plain("1"),
+        ],
+    )
+    plugin = make_plugin()
+
+    results = [item async for item in plugin.legacy_command(event)]
+
+    assert results == []
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert payload["messages"][0]["data"]["user_id"] == "2116183730"
+    assert payload["messages"][0]["data"]["content"] == [
+        {"type": "text", "data": {"text": "1"}},
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message_components",
+    [
+        [Plain("/伪造消息 [At:2116183730] 1")],
+        [],
+    ],
+)
+async def test_legacy_command_accepts_textual_at_placeholder(message_components):
+    group_members = members()
+    group_members["2116183730"] = {
+        "card": "Placeholder User",
+        "nickname": "Placeholder User",
+        "role": "member",
+    }
+    bot = FakeBot(group_members)
+    event = FakeEvent(
+        bot,
+        message="/伪造消息 [At:2116183730] 1",
+        messages=message_components,
+    )
+    plugin = make_plugin()
+
+    results = [item async for item in plugin.legacy_command(event)]
+
+    assert results == []
+    payload = next(
+        kwargs for action, kwargs in bot.calls if action == "send_group_forward_msg"
+    )
+    assert payload["messages"][0]["data"]["user_id"] == "2116183730"
+    assert payload["messages"][0]["data"]["content"] == [
+        {"type": "text", "data": {"text": "1"}},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_command_rejects_at_all_as_a_qq_id():
+    bot = FakeBot(members())
+    event = FakeEvent(
+        bot,
+        messages=[Plain("/伪造转发 "), AtAll(), Plain(": hello")],
+    )
+    plugin = make_plugin()
+
+    results = [item async for item in plugin.forward_command(event)]
+
+    assert results == ["SessionFaker：@ 用户必须是有效的数字 QQ 号"]
+    assert not any(action == "send_group_forward_msg" for action, _ in bot.calls)
 
 
 @pytest.mark.asyncio

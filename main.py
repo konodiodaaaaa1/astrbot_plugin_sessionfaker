@@ -29,6 +29,7 @@ from .forward_message import (
 PLUGIN_NAME = "SessionFaker"
 SUPPORTED_PLATFORM = "aiocqhttp"
 _COMMAND_PREFIX = re.compile(r"^\s*/?(?:伪造转发|伪造消息)\s*", re.IGNORECASE)
+_COMMAND_AT_PLACEHOLDER = re.compile(r"\[At:([^\]\r\n]+)\]")
 
 
 class SessionFakerPlugin(Star):
@@ -217,11 +218,51 @@ class SessionFakerPlugin(Star):
         return len(resolved_nodes)
 
     @staticmethod
-    def _command_body(event: AstrMessageEvent) -> str:
-        return _COMMAND_PREFIX.sub("", event.get_message_str(), count=1).strip()
+    def _command_qq_id(value: Any) -> str:
+        qq = str(value or "").strip()
+        if not qq.isdigit() or int(qq) <= 0 or len(qq) > 20:
+            raise ForwardMessageError("@ 用户必须是有效的数字 QQ 号")
+        return qq
 
-    @staticmethod
+    @classmethod
+    def _normalize_command_text(cls, text: str) -> str:
+        return _COMMAND_AT_PLACEHOLDER.sub(
+            lambda match: cls._command_qq_id(match.group(1)),
+            text,
+        )
+
+    @classmethod
+    def _command_body(cls, event: AstrMessageEvent) -> str:
+        components = event.get_messages()
+        if components:
+            chunks: list[str] = []
+            prefix_pending = True
+            self_id = str(event.get_self_id() or "").strip()
+            for component in components:
+                if isinstance(component, Plain):
+                    text = cls._normalize_command_text(component.text)
+                    if prefix_pending:
+                        without_prefix = _COMMAND_PREFIX.sub("", text, count=1)
+                        if without_prefix != text:
+                            prefix_pending = False
+                        text = without_prefix
+                    chunks.append(text)
+                elif isinstance(component, At):
+                    qq = cls._command_qq_id(component.qq)
+                    if prefix_pending and qq == self_id:
+                        continue
+                    chunks.append(qq)
+
+            body = "".join(chunks).strip()
+            if body or not prefix_pending:
+                return body
+
+        message_text = cls._normalize_command_text(event.get_message_str())
+        return _COMMAND_PREFIX.sub("", message_text, count=1).strip()
+
+    @classmethod
     def _legacy_body_and_images(
+        cls,
         event: AstrMessageEvent,
     ) -> tuple[str, list[list[str]]]:
         parts: list[str] = []
@@ -229,13 +270,16 @@ class SessionFakerPlugin(Star):
         current_text = ""
         current_images: list[str] = []
         prefix_pending = True
+        self_id = str(event.get_self_id() or "").strip()
 
         for component in event.get_messages():
             if isinstance(component, Plain):
-                text = component.text
+                text = cls._normalize_command_text(component.text)
                 if prefix_pending:
-                    text = _COMMAND_PREFIX.sub("", text, count=1)
-                    prefix_pending = False
+                    without_prefix = _COMMAND_PREFIX.sub("", text, count=1)
+                    if without_prefix != text:
+                        prefix_pending = False
+                    text = without_prefix
                 chunks = text.split("|")
                 current_text += chunks[0]
                 for chunk in chunks[1:]:
@@ -243,6 +287,11 @@ class SessionFakerPlugin(Star):
                     images.append(current_images)
                     current_text = chunk
                     current_images = []
+            elif isinstance(component, At):
+                qq = cls._command_qq_id(component.qq)
+                if prefix_pending and qq == self_id:
+                    continue
+                current_text += f"{qq} "
             elif isinstance(component, Image):
                 url = str(getattr(component, "url", "") or "").strip()
                 if url:
@@ -293,9 +342,9 @@ class SessionFakerPlugin(Star):
         event.stop_event()
         yield event.plain_result(
             "SessionFaker 用法：\n"
-            "/伪造转发 后接 JSON 节点数组，或每行一条：QQ号[显示名]: 内容\n"
+            "/伪造转发 后接 JSON 节点数组，或每行一条：QQ号/[At:QQ号][显示名]: 内容\n"
             "行内支持 [at:QQ号]、[image:https://...]、[face:ID]\n"
-            "旧格式：/伪造消息 QQ号 内容 | QQ号 内容"
+            "旧格式：/伪造消息 QQ号/[At:QQ号] 内容 | QQ号/[At:QQ号] 内容"
         )
 
     @filter.llm_tool(name="send_qq_forward_message")

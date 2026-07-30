@@ -47,8 +47,12 @@ _INLINE_TOKEN = re.compile(
     r"(?<!\\)(?:\[(at|image|face):([^\]\r\n]+)\]|"
     r"\[CQ:(image|face),([^\]\r\n]+)\])"
 )
-_DSL_NODE = re.compile(r"^\s*(\d+)(?:\[([^\]\r\n]+)\])?\s*:\s*(.*)$")
-_LEGACY_NODE = re.compile(r"^\s*(\d+)\s+(.+?)\s*$", re.DOTALL)
+_SENDER_ID_TOKEN = r"(?:\d+|\[At:[^\]\r\n]+\])"
+_TEXTUAL_AT_ID = re.compile(r"^\[At:([^\]\r\n]+)\]$")
+_DSL_NODE = re.compile(
+    rf"^\s*({_SENDER_ID_TOKEN})(?:\[([^\]\r\n]+)\])?\s*:\s*(.*)$"
+)
+_LEGACY_NODE = re.compile(rf"^\s*({_SENDER_ID_TOKEN})\s+(.+?)\s*$", re.DOTALL)
 
 
 def _error(message: str) -> ForwardMessageError:
@@ -62,6 +66,14 @@ def _positive_id(value: Any, label: str) -> str:
     if not text.isdigit() or int(text) <= 0 or len(text) > 20:
         raise _error(f"{label}必须是有效的数字 ID")
     return text
+
+
+def _sender_id(value: Any, label: str) -> str:
+    text = str(value).strip()
+    match = _TEXTUAL_AT_ID.fullmatch(text)
+    if match:
+        text = match.group(1).strip()
+    return _positive_id(text, label)
 
 
 def _nonnegative_id(value: Any, label: str) -> str:
@@ -205,7 +217,7 @@ def _node_from_mapping(raw: Mapping[str, Any], limits: Limits) -> ForwardNode:
     if "content" not in raw:
         raise _error("节点缺少 content")
     return ForwardNode(
-        sender_id=_positive_id(raw["sender_id"], "sender_id"),
+        sender_id=_sender_id(raw["sender_id"], "sender_id"),
         sender_name=_name(raw.get("sender_name"), limits),
         content=_content(raw["content"]),
     )
@@ -240,7 +252,7 @@ def parse_dsl(value: str, limits: Limits | None = None) -> list[ForwardNode]:
         sender_id, sender_name, content = match.groups()
         try:
             node = ForwardNode(
-                sender_id=_positive_id(sender_id, "QQ 号"),
+                sender_id=_sender_id(sender_id, "QQ 号"),
                 sender_name=_name(sender_name, limits),
                 content=parse_inline_content(content),
             )
@@ -261,7 +273,9 @@ def parse_legacy(
     for index, part in enumerate(parts):
         match = _LEGACY_NODE.fullmatch(part)
         if not match:
-            raise _error(f"第 {index + 1} 段格式错误，应为 QQ号 内容")
+            raise _error(
+                f"第 {index + 1} 段格式错误，应为 QQ号/[At:QQ号] 内容"
+            )
         sender_id, text = match.groups()
         segments = [Segment("text", text)]
         if images_by_node and index < len(images_by_node):
@@ -269,7 +283,7 @@ def parse_legacy(
                 Segment("image", _image_source(url))
                 for url in images_by_node[index]
             )
-        nodes.append(ForwardNode(_positive_id(sender_id, "QQ 号"), None, tuple(segments)))
+        nodes.append(ForwardNode(_sender_id(sender_id, "QQ 号"), None, tuple(segments)))
     return validate_nodes(nodes, limits)
 
 

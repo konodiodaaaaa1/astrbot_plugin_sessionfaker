@@ -127,6 +127,15 @@ def test_legacy_images_stay_with_corresponding_node():
     assert nodes[1].content[-1].value.endswith("2.png")
 
 
+def test_legacy_accepts_textual_at_placeholder_as_sender_id():
+    nodes = parse_legacy("[At:2116183730] 1")
+
+    assert nodes[0].sender_id == "2116183730"
+    assert [(item.type, item.value) for item in nodes[0].content] == [
+        ("text", "1"),
+    ]
+
+
 @pytest.mark.parametrize(
     ("value", "message"),
     [
